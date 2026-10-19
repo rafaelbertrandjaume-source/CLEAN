@@ -65,7 +65,7 @@ class TrackChain {
 
 export class MixGraph {
   readonly masterIn: GainNode;
-  readonly analyser: AnalyserNode;
+  readonly analysers: [AnalyserNode, AnalyserNode]; // gauche, droite
   private limiter: DynamicsCompressorNode;
   private masterGain: GainNode;
   private chains = new Map<string, TrackChain>();
@@ -80,10 +80,15 @@ export class MixGraph {
     this.limiter.attack.value = 0.002;
     this.limiter.release.value = 0.1;
     this.masterGain = ctx.createGain();
-    this.analyser = ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
+    const split = ctx.createChannelSplitter(2);
+    this.analysers = [ctx.createAnalyser(), ctx.createAnalyser()];
+    this.analysers.forEach((a, i) => {
+      a.fftSize = 2048;
+      split.connect(a, i);
+    });
     this.masterIn.connect(this.limiter).connect(this.masterGain);
-    this.masterGain.connect(this.analyser).connect(ctx.destination);
+    this.masterGain.connect(ctx.destination);
+    this.masterGain.connect(split);
   }
 
   sync(p: Project) {

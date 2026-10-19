@@ -9,6 +9,10 @@ DAW expérimental piloté par le texte : un agent Claude compose, arrange, conç
 - **Agent** : 16 outils typés sur le projet + recherche web (côté serveur Anthropic), réflexion adaptative, `analyze_mix` (rendu hors ligne et mesure crête/RMS par piste). Un tour complet de l'agent = une seule entrée d'annulation.
 - **Fournisseur local** optionnel : LM Studio (API compatible OpenAI) pour travailler hors ligne.
 
+## Design
+
+Direction visuelle conçue dans Claude Design : https://claude.ai/artifact/UzyVYHqgLdzSwrA6GMcHi3 (session, rack, tokens et composants). Ambre pour le transport et le temps, lilas pour tout ce que fait l'agent ; Instrument Sans + IBM Plex Mono, embarquées via Fontsource (fonctionne hors ligne).
+
 ## Lancer
 
 Prérequis : Node 20+. Pour l'app de bureau : Rust (`curl https://sh.rustup.rs -sSf | sh`) et les outils Xcode en ligne de commande (`xcode-select --install`).

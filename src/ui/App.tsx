@@ -1,19 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { engine } from "../engine/engine";
 import { useProject } from "../state/store";
 import { Arrangement } from "./Arrangement";
+import { BottomPanel } from "./BottomPanel";
 import { ChatPanel } from "./ChatPanel";
-import { DevicePanel } from "./DevicePanel";
-import { PianoRoll } from "./PianoRoll";
 import { Transport } from "./Transport";
 
 export function App() {
-  const [bottom, setBottom] = useState<"editor" | "device">("editor");
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const el = e.target as HTMLElement;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.getAttribute("role") === "slider") return;
       const mod = e.metaKey || e.ctrlKey;
       if (e.code === "Space") {
         e.preventDefault();
@@ -39,20 +36,10 @@ export function App() {
     <div className="app">
       <Transport />
       <div className="main">
-        <div className="workspace">
+        <main className="workspace">
           <Arrangement />
-          <div className="bottom">
-            <div className="tabs">
-              <button className={bottom === "editor" ? "active" : ""} onClick={() => setBottom("editor")}>
-                Notes
-              </button>
-              <button className={bottom === "device" ? "active" : ""} onClick={() => setBottom("device")}>
-                Instrument & effets
-              </button>
-            </div>
-            {bottom === "editor" ? <PianoRoll /> : <DevicePanel />}
-          </div>
-        </div>
+          <BottomPanel />
+        </main>
         <ChatPanel />
       </div>
     </div>

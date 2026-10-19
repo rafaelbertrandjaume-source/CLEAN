@@ -34,8 +34,8 @@ class AudioEngine {
     return { ctx: this.ctx, graph: this.graph };
   }
 
-  get analyser(): AnalyserNode | null {
-    return this.graph?.analyser ?? null;
+  get analysers(): [AnalyserNode, AnalyserNode] | null {
+    return this.graph?.analysers ?? null;
   }
 
   onChange(fn: () => void) {

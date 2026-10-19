@@ -67,6 +67,7 @@ export function measure(buf: AudioBuffer) {
       n++;
     }
   }
-  const toDb = (x: number) => (x > 0 ? Math.round(20 * Math.log10(x) * 10) / 10 : -Infinity);
+  // Plancher à -120 dBFS : -Infinity ne survit pas à JSON (il devient null)
+  const toDb = (x: number) => Math.max(-120, x > 0 ? Math.round(20 * Math.log10(x) * 10) / 10 : -120);
   return { peakDb: toDb(peak), rmsDb: toDb(Math.sqrt(sum / Math.max(n, 1))) };
 }

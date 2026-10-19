@@ -12,16 +12,25 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { create } from "zustand";
 import { projectNow, useProject } from "../state/store";
+import type { Project } from "../state/types";
 import { SYSTEM_PROMPT } from "./prompt";
 import { TOOL_DEFS, projectBrief, runTool } from "./tools";
 
-export type ChatItem =
-  | { id: string; kind: "user"; text: string }
-  | { id: string; kind: "assistant"; text: string }
-  | { id: string; kind: "thinking"; text: string }
-  | { id: string; kind: "tool"; name: string; status: "running" | "ok" | "error"; detail?: string }
-  | { id: string; kind: "search"; query: string; results: { title: string; url: string }[] }
-  | { id: string; kind: "error"; text: string };
+export type ChatItem = { id: string; turn: number } & (
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string }
+  | { kind: "thinking"; text: string; startedAt: number; endedAt?: number }
+  | { kind: "tool"; name: string; status: "running" | "ok" | "error"; detail?: string; data?: unknown }
+  | { kind: "search"; query: string; results: { title: string; url: string }[] }
+  | { kind: "error"; text: string }
+);
+
+// Éléments du projet créés ou modifiés par l'agent au dernier tour (mis en évidence dans l'interface)
+export interface Touched {
+  clips: Set<string>;
+  effects: Set<string>;
+  tracks: Set<string>;
+}
 
 export interface Settings {
   provider: "anthropic" | "local";
@@ -68,6 +77,13 @@ interface ChatStore {
   abort: AbortController | null;
   anthropicHistory: BetaMessageParam[];
   localHistory: LocalMessage[];
+  turn: number;
+  touched: Touched;
+  // État du projet à la fin du dernier tour : tant qu'il n'a pas changé, « Annuler le tour » est sûr
+  afterTurn: Project | null;
+  undoTurn: () => void;
+  draft: string;
+  setDraft: (text: string) => void;
   saveSettings: (s: Partial<Settings>) => void;
   send: (text: string) => Promise<void>;
   stop: () => void;
@@ -79,7 +95,17 @@ const nid = () => `i${++seq}`;
 const MAX_TURNS = 40;
 
 export const useChat = create<ChatStore>((set, get) => {
-  const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
+  type NewItem = ChatItem extends infer T ? (T extends ChatItem ? Omit<T, "turn"> : never) : never;
+  const push = (item: NewItem) => {
+    const now = Date.now();
+    // Une réflexion se termine quand le bloc suivant commence
+    set((s) => ({
+      items: [
+        ...s.items.map((it) => (it.kind === "thinking" && !it.endedAt ? { ...it, endedAt: now } : it)),
+        { ...item, turn: s.turn } as ChatItem,
+      ],
+    }));
+  };
   const patch = (id: string, fn: (it: ChatItem) => ChatItem) =>
     set((s) => ({ items: s.items.map((it) => (it.id === id ? fn(it) : it)) }));
 
@@ -87,7 +113,8 @@ export const useChat = create<ChatStore>((set, get) => {
     try {
       if (typeof input !== "object" || input === null || Array.isArray(input)) throw new Error("Entrée d'outil invalide (objet JSON attendu)");
       const result = await runTool(name, input as Record<string, unknown>);
-      patch(itemId, (it) => ({ ...it, status: "ok", detail: summarize(name, input as Record<string, unknown>) }) as ChatItem);
+      const data = name === "analyze_mix" ? JSON.parse(result) : undefined;
+      patch(itemId, (it) => ({ ...it, status: "ok", detail: summarize(name, input as Record<string, unknown>), data }) as ChatItem);
       return { content: result, isError: false };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -110,7 +137,7 @@ export const useChat = create<ChatStore>((set, get) => {
       role: "user",
       content: [
         { type: "text", text: userText },
-        { type: "text", text: `<project_state>\n${projectBrief(projectNow())}\n</project_state>` },
+        { type: "text", text: `<project_state>\n${projectBrief(projectNow())}${selectionBrief()}\n</project_state>` },
       ],
     });
     set({ anthropicHistory: history });
@@ -139,7 +166,7 @@ export const useChat = create<ChatStore>((set, get) => {
           const b = ev.content_block as BetaContentBlock;
           const id = nid();
           if (b.type === "text") push({ id, kind: "assistant", text: "" });
-          else if (b.type === "thinking") push({ id, kind: "thinking", text: "" });
+          else if (b.type === "thinking") push({ id, kind: "thinking", text: "", startedAt: Date.now() });
           else if (b.type === "tool_use") push({ id, kind: "tool", name: b.name, status: "running" });
           else if (b.type === "server_tool_use" && b.name === "web_search") push({ id, kind: "search", query: "…", results: [] });
           else if (b.type === "web_search_tool_result") {
@@ -218,7 +245,7 @@ export const useChat = create<ChatStore>((set, get) => {
     const { settings } = get();
     const history = [...get().localHistory];
     if (history.length === 0) history.push({ role: "system", content: SYSTEM_PROMPT });
-    history.push({ role: "user", content: `${userText}\n\n<project_state>\n${projectBrief(projectNow())}\n</project_state>` });
+    history.push({ role: "user", content: `${userText}\n\n<project_state>\n${projectBrief(projectNow())}${selectionBrief()}\n</project_state>` });
 
     const tools = TOOL_DEFS.map((t) => ({
       type: "function",
@@ -264,6 +291,17 @@ export const useChat = create<ChatStore>((set, get) => {
     abort: null,
     anthropicHistory: [],
     localHistory: [],
+    turn: 0,
+    touched: { clips: new Set(), effects: new Set(), tracks: new Set() },
+    afterTurn: null,
+    undoTurn: () => {
+      const proj = useProject.getState();
+      if (get().afterTurn !== proj.project) return;
+      proj.undo();
+      set({ afterTurn: null, touched: { clips: new Set(), effects: new Set(), tracks: new Set() } });
+    },
+    draft: "",
+    setDraft: (draft) => set({ draft }),
 
     saveSettings: (s) => {
       const settings = { ...get().settings, ...s };
@@ -280,8 +318,9 @@ export const useChat = create<ChatStore>((set, get) => {
     send: async (text) => {
       if (get().busy || !text.trim()) return;
       const abort = new AbortController();
-      set({ busy: true, abort });
+      set((s) => ({ busy: true, abort, turn: s.turn + 1 }));
       push({ id: nid(), kind: "user", text });
+      const before = projectNow();
       // Tout le tour de l'agent = une seule entrée d'annulation
       useProject.getState().beginTransaction();
       try {
@@ -293,7 +332,8 @@ export const useChat = create<ChatStore>((set, get) => {
         repairHistory();
       } finally {
         useProject.getState().endTransaction();
-        set({ busy: false, abort: null });
+        const after = projectNow();
+        set({ busy: false, abort: null, touched: diffProjects(before, after), afterTurn: after !== before ? after : null });
       }
     },
 
@@ -302,7 +342,8 @@ export const useChat = create<ChatStore>((set, get) => {
       repairHistory();
     },
 
-    reset: () => set({ items: [], anthropicHistory: [], localHistory: [] }),
+    reset: () =>
+      set({ items: [], anthropicHistory: [], localHistory: [], touched: { clips: new Set(), effects: new Set(), tracks: new Set() } }),
   };
 
   // Garantit que l'historique se termine par un tour assistant complet (sans tool_use en attente),
@@ -334,4 +375,28 @@ function summarize(name: string, input: Record<string, unknown>): string | undef
   if (name === "add_effect") return String(input.type);
   if (name === "set_song" && input.bpm) return `${input.bpm} BPM`;
   return undefined;
+}
+
+// Sélection courante de l'interface, transmise à l'agent comme contexte implicite.
+function selectionBrief(): string {
+  const { project, selectedTrackId, selectedClipId } = useProject.getState();
+  const track = project.tracks.find((t) => t.id === selectedTrackId);
+  if (!track) return "";
+  const clip = track.clips.find((c) => c.id === selectedClipId);
+  return `\nSélection de l'utilisateur : piste ${track.id} "${track.name}"${clip ? `, clip ${clip.id} "${clip.name}" (mesures ${clip.startBar + 1}-${clip.startBar + clip.lengthBars})` : ""}`;
+}
+
+function diffProjects(a: Project, b: Project): Touched {
+  const out: Touched = { clips: new Set(), effects: new Set(), tracks: new Set() };
+  if (a === b) return out;
+  const oldTracks = new Map(a.tracks.map((t) => [t.id, t]));
+  for (const t of b.tracks) {
+    const old = oldTracks.get(t.id);
+    if (!old || JSON.stringify({ ...old, clips: 0, effects: 0 }) !== JSON.stringify({ ...t, clips: 0, effects: 0 })) out.tracks.add(t.id);
+    const oldClips = new Map((old?.clips ?? []).map((c) => [c.id, JSON.stringify(c)]));
+    for (const c of t.clips) if (oldClips.get(c.id) !== JSON.stringify(c)) out.clips.add(c.id);
+    const oldFx = new Map((old?.effects ?? []).map((e) => [e.id, JSON.stringify(e)]));
+    for (const e of t.effects) if (oldFx.get(e.id) !== JSON.stringify(e)) out.effects.add(e.id);
+  }
+  return out;
 }

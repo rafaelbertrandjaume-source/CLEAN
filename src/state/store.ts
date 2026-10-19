@@ -3,6 +3,7 @@ import type { Project } from "./types";
 import { demoProject } from "./demo";
 
 const MAX_HISTORY = 100;
+let lastCoalesce: { key: string | null; at: number } = { key: null, at: 0 };
 
 interface ProjectStore {
   project: Project;
@@ -14,7 +15,9 @@ interface ProjectStore {
   selectedTrackId: string | null;
   selectedClipId: string | null;
 
-  edit: (mutate: (draft: Project) => void) => void;
+  // coalesce : les éditions successives portant la même clé (geste continu sur un
+  // potentiomètre, un fader) forment une seule entrée d'historique.
+  edit: (mutate: (draft: Project) => void, opts?: { coalesce?: string }) => void;
   beginTransaction: () => void;
   endTransaction: () => void;
   undo: () => void;
@@ -31,13 +34,16 @@ export const useProject = create<ProjectStore>((set, get) => ({
   selectedTrackId: null,
   selectedClipId: null,
 
-  edit: (mutate) => {
+  edit: (mutate, opts) => {
     const { project, past, txOpen } = get();
     const draft = structuredClone(project);
     mutate(draft); // peut lever une erreur : l'état reste alors inchangé
+    const now = Date.now();
+    const merge = !!opts?.coalesce && opts.coalesce === lastCoalesce.key && now - lastCoalesce.at < 1000;
+    lastCoalesce = { key: opts?.coalesce ?? null, at: now };
     set({
       project: draft,
-      past: txOpen ? past : [...past, project].slice(-MAX_HISTORY),
+      past: txOpen || merge ? past : [...past, project].slice(-MAX_HISTORY),
       future: [],
     });
   },
