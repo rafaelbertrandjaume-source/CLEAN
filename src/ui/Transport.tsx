@@ -1,19 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { engine } from "../engine/engine";
 import { encodeWav, renderProject } from "../engine/render";
+import { saveFile } from "../platform";
 import { useProject } from "../state/store";
 import type { Project } from "../state/types";
 import { IconLoop, IconPlay, IconRedo, IconRewind, IconStop, IconUndo } from "./icons";
 import { usePlayhead } from "./usePlayhead";
 
-function download(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+const download = (blob: Blob, name: string) =>
+  saveFile(blob, name).catch(() => {
+    /* le viewer a refusé ou annulé l'enregistrement */
+  });
 
 export function Transport() {
   const project = useProject((s) => s.project);
@@ -23,6 +20,7 @@ export function Transport() {
   const { beat, playing } = usePlayhead();
   const [rendering, setRendering] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const bpb = project.beatsPerBar;
@@ -46,7 +44,7 @@ export function Transport() {
       engine.stop(true);
       useProject.getState().load(p);
     } catch (e) {
-      alert(`Projet illisible : ${e instanceof Error ? e.message : e}`);
+      setNotice(`Projet illisible : ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -142,6 +140,11 @@ export function Transport() {
           )}
           <input ref={fileRef} type="file" accept=".json" hidden onChange={(e) => e.target.files?.[0] && openProject(e.target.files[0])} />
         </div>
+        {notice && (
+          <span role="alert" style={{ color: "var(--error)", fontSize: 12 }} onClick={() => setNotice(null)}>
+            {notice}
+          </span>
+        )}
         <button className="primary" disabled={rendering} onClick={exportWav}>
           {rendering ? "Rendu…" : "Exporter WAV"}
         </button>

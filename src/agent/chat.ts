@@ -11,6 +11,7 @@ import type {
   BetaToolUnion,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { create } from "zustand";
+import { getSample, inClaudeViewer, type SampleError, type SampleTool } from "../platform";
 import { projectNow, useProject } from "../state/store";
 import type { Project } from "../state/types";
 import { SYSTEM_PROMPT } from "./prompt";
@@ -33,7 +34,8 @@ export interface Touched {
 }
 
 export interface Settings {
-  provider: "anthropic" | "local";
+  // claudeai : Artifact publié sur claude.ai, l'agent tourne sur le compte du viewer
+  provider: "anthropic" | "local" | "claudeai";
   apiKey: string;
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
@@ -44,7 +46,7 @@ export interface Settings {
 
 const SETTINGS_KEY = "clean.settings";
 const DEFAULT_SETTINGS: Settings = {
-  provider: "anthropic",
+  provider: inClaudeViewer ? "claudeai" : "anthropic",
   apiKey: "",
   model: "claude-opus-5-5",
   effort: "high",
@@ -56,7 +58,13 @@ const DEFAULT_SETTINGS: Settings = {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const saved = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } as Settings;
+      // Hors viewer claude.ai le mode claudeai n'existe pas ; dans le viewer, le réseau
+      // de la page est bloqué, donc seul claudeai peut fonctionner
+      saved.provider = inClaudeViewer ? "claudeai" : saved.provider === "claudeai" ? "anthropic" : saved.provider;
+      return saved;
+    }
   } catch {
     /* stockage indisponible : valeurs par défaut */
   }
@@ -241,6 +249,59 @@ export const useChat = create<ChatStore>((set, get) => {
     }
   }
 
+  // Agent via la capacité `sample` du viewer : pas de clé API ni de recherche web,
+  // un nombre de tours d'outils limité par la plateforme. L'historique est gardé en texte.
+  async function runClaudeAi(userText: string, signal: AbortSignal) {
+    const sample = await getSample();
+    if (!sample) throw new Error("Claude n'est pas disponible dans cette vue.");
+    const limits = await sample.limits().catch(() => null);
+    if (!limits?.tools) throw new Error("Cette vue ne permet pas à l'agent d'agir sur le projet.");
+
+    const tools: SampleTool[] = TOOL_DEFS.slice(0, limits.tools.maxCount).map((t) => ({
+      name: t.name,
+      description: t.description.length > 1000 ? `${t.description.slice(0, 997)}...` : t.description,
+      inputSchema: t.input_schema,
+      execute: async (input) => {
+        const id = nid();
+        push({ id, kind: "tool", name: t.name, status: "running" });
+        const r = await execTool(id, t.name, input);
+        if (r.isError) throw new Error(r.content);
+        return r.content;
+      },
+    }));
+
+    const history = [...get().localHistory].filter((m) => m.role === "user" || m.role === "assistant") as { role: "user" | "assistant"; content: string }[];
+    const turn = `${userText}\n\n<project_state>\n${projectBrief(projectNow())}${selectionBrief()}\n</project_state>`;
+    // Les plus anciens échanges tombent d'abord pour rester sous la limite de taille
+    let past = history;
+    const size = (h: typeof history) => SYSTEM_PROMPT.length + turn.length + h.reduce((n, m) => n + m.content.length, 0);
+    while (past.length && size(past) > (limits.maxPromptBytes ?? 65536) * 0.8) past = past.slice(2);
+
+    const { effort } = get().settings;
+    const answerId = nid();
+    push({ id: answerId, kind: "assistant", text: "" });
+    try {
+      const { text } = await sample(
+        [
+          { role: "user", content: `${SYSTEM_PROMPT}\n\nLa recherche web n'est pas disponible dans ce mode : appuie-toi sur tes connaissances.` },
+          ...past,
+          { role: "user", content: turn },
+        ],
+        {
+          tools,
+          signal,
+          modelTier: effort === "low" ? "quick" : effort === "xhigh" || effort === "max" ? "complex" : "default",
+          onText: ({ text }) => patch(answerId, (it) => (it.kind === "assistant" ? { ...it, text } : it)),
+        },
+      );
+      set({ localHistory: [...history, { role: "user", content: turn }, { role: "assistant", content: text }] });
+    } catch (e) {
+      const err = e as SampleError;
+      if (err.text) patch(answerId, (it) => (it.kind === "assistant" ? { ...it, text: err.text! } : it));
+      throw new Error(sampleErrorText(err));
+    }
+  }
+
   async function runLocal(userText: string, signal: AbortSignal) {
     const { settings } = get();
     const history = [...get().localHistory];
@@ -324,7 +385,9 @@ export const useChat = create<ChatStore>((set, get) => {
       // Tout le tour de l'agent = une seule entrée d'annulation
       useProject.getState().beginTransaction();
       try {
-        if (get().settings.provider === "anthropic") await runAnthropic(text, abort.signal);
+        const { provider } = get().settings;
+        if (provider === "claudeai") await runClaudeAi(text, abort.signal);
+        else if (provider === "anthropic") await runAnthropic(text, abort.signal);
         else await runLocal(text, abort.signal);
       } catch (e) {
         if (!abort.signal.aborted) push({ id: nid(), kind: "error", text: describeError(e) });
@@ -360,6 +423,25 @@ export const useChat = create<ChatStore>((set, get) => {
     set({ anthropicHistory: h });
   }
 });
+
+function sampleErrorText(e: SampleError): string {
+  switch (e.code) {
+    case "cancelled":
+      return "Arrêté.";
+    case "not_granted":
+      return "Accès à Claude refusé pour cette page. Recharge la page pour qu'il te soit redemandé.";
+    case "rate_limited":
+      return "Limite d'utilisation atteinte, réessaie dans un moment.";
+    case "prompt_too_large":
+      return "Conversation trop longue : démarre une nouvelle conversation (+).";
+    case "refused":
+      return "Claude a refusé cette demande.";
+    case "session_expired":
+      return "Session claude.ai expirée : reconnecte-toi.";
+    default:
+      return `Échec de l'appel à Claude (${e.code ?? "inconnu"}).`;
+  }
+}
 
 function describeError(e: unknown): string {
   if (e instanceof Anthropic.AuthenticationError) return "Clé API invalide.";

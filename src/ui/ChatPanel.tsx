@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat, type ChatItem } from "../agent/chat";
+import { inClaudeViewer } from "../platform";
 import { useProject } from "../state/store";
 import { IconChevron, IconGear, IconPlus, IconSearch, IconSend, IconStop, Spark } from "./icons";
 
@@ -50,7 +51,12 @@ export function ChatPanel() {
   const track = project.tracks.find((t) => t.id === trackId);
   const clip = track?.clips.find((c) => c.id === clipId);
   const blocks = group(items);
-  const modelLabel = settings.provider === "anthropic" ? `${MODEL_LABELS[settings.model] ?? settings.model} · ${settings.effort}${settings.webSearch ? " · web" : ""}` : `local · ${settings.localModel || "LM Studio"}`;
+  const modelLabel =
+    settings.provider === "claudeai"
+      ? `claude.ai · ${settings.effort}`
+      : settings.provider === "anthropic"
+        ? `${MODEL_LABELS[settings.model] ?? settings.model} · ${settings.effort}${settings.webSearch ? " · web" : ""}`
+        : `local · ${settings.localModel || "LM Studio"}`;
 
   return (
     <aside className="chat" aria-label="Agent">
@@ -254,6 +260,23 @@ const hostname = (url: string) => {
 
 function SettingsForm() {
   const { settings, saveSettings } = useChat();
+  if (inClaudeViewer) {
+    return (
+      <div className="settings">
+        <label>
+          Profondeur de réflexion
+          <select value={settings.effort} onChange={(e) => saveSettings({ effort: e.target.value as typeof settings.effort })}>
+            <option value="low">Rapide</option>
+            <option value="high">Standard</option>
+            <option value="max">Approfondie</option>
+          </select>
+        </label>
+        <p className="settings-hint">
+          Dans claude.ai, l’agent utilise ton compte Claude : pas de clé API. Claude te demande l’autorisation au premier message. La recherche web n’est pas disponible dans ce mode.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="settings">
       <div className="segmented" role="tablist" aria-label="Fournisseur">
